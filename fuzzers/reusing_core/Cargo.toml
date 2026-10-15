@@ -1,0 +1,15 @@
+[package]
+name = "reusing_core"
+version = "0.1.0"
+edition = "2021"
+
+# The reusing stage, independent of how the target is run: it only reads a
+# testcase's bytes, overwrites the ranges a prior taint scan marked, and asks
+# the fuzzer to evaluate the result. Both the forkserver fuzzer (unibench) and
+# the in-process one (FuzzBench) depend on this by path, the way StorFuzz's
+# fuzzers share storfuzz_constants.
+
+[dependencies]
+libafl = { path = "../../libafl/" }
+libafl_bolts = { path = "../../libafl_bolts/" }
+serde = { version = "1.0", default-features = false, features = ["alloc", "derive"] }
