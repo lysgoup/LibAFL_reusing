@@ -76,3 +76,6 @@ program
 fuzzer
 fuzzer_libpng*
 forkserver_simple
+
+# tools/build.sh keeps its rebuild-skip hashes here
+/_build_cache/
