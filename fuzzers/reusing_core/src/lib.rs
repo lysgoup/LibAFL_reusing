@@ -24,7 +24,8 @@ pub mod meta;
 pub mod pool;
 pub mod stage;
 
-pub use meta::{FromSeed, ReusingCursors, ReusingData};
+pub use meta::{FromSeed, ReusingCursors};
+pub use pool::ReusingPool;
 pub use stage::ReusingStage;
 
 /// How many pool values one range set gets before the stage moves to the next.
