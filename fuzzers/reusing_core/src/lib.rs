@@ -24,6 +24,7 @@ pub mod meta;
 pub mod pool;
 pub mod stage;
 
+pub use energy::ReusingEnergyStage;
 pub use meta::{FromSeed, ReusingCursors};
 pub use pool::ReusingPool;
 pub use stage::ReusingStage;

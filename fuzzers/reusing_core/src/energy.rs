@@ -13,26 +13,59 @@
 //! made where the count is drawn instead, which leaves the scheduler and the
 //! baseline arm untouched -- the alternative, swapping in `PowerQueueScheduler`,
 //! would change what we are comparing against.
+//!
+//! The shape: [`ReusingEnergyStage`] wraps the inner stage as a
+//! [`MutationalStage`] rather than a plain [`Stage`], overrides only
+//! [`iterations`](MutationalStage::iterations), and leaves the mutator and the
+//! mutate-evaluate loop to the trait's own `perform_mutational`. Repeating the
+//! inner stage's `perform` would redraw the count per repeat and re-enter the
+//! restart bookkeeping each time; this scales the one draw AFL++ scales.
+//!
+//! Ported from `AFLplusplus_reusing/src/afl-fuzz-one.c` (the
+//! `afl->reusing_mode` block after `PERFORMANCE SCORE`).
 
 use core::marker::PhantomData;
 
 use libafl::{
-    stages::Stage,
-    state::{HasCorpus, HasRand, UsesState},
-    Error, HasMetadata,
+    mutators::Mutator,
+    stages::{
+        mutational::{MutatedTransform, DEFAULT_MUTATIONAL_MAX_ITERATIONS},
+        MutationalStage, Stage,
+    },
+    state::{HasCorpus, HasCurrentTestcase, HasRand, UsesState},
+    Error, Evaluator, HasMetadata,
 };
+
+use crate::{meta::FromSeed, NEW_ENERGY_MULT, SEED_ENERGY_DIV};
+
+/// Scales one iteration draw the way AFL++ scales `perf_score`.
+///
+/// A seed gives up [`SEED_ENERGY_DIV`] of its share but never reaches zero --
+/// AFL++ floors at 1, and a zero here would skip the entry entirely rather
+/// than deprioritize it. Everything else gets [`NEW_ENERGY_MULT`] times its
+/// draw, capped at the mult times the ordinary ceiling, as AFL++ caps the
+/// boost at `havoc_max_mult * 100 * REUSING_NEW_ENERGY_MULT`.
+#[must_use]
+pub fn scale(base: usize, from_seed: bool) -> usize {
+    if from_seed {
+        (base / SEED_ENERGY_DIV).max(1)
+    } else {
+        (base * NEW_ENERGY_MULT).min(DEFAULT_MUTATIONAL_MAX_ITERATIONS * NEW_ENERGY_MULT)
+    }
+}
 
 /// Wraps a mutational stage and rescales how many iterations it runs.
 ///
 /// Seeds get half, everything else eight times, capped the way AFL++ caps the
 /// boost at the ordinary havoc ceiling.
 #[derive(Debug)]
-pub struct ReusingEnergyStage<ST, E, EM, Z> {
+pub struct ReusingEnergyStage<ST, E, EM, I, M, Z> {
     inner: ST,
-    phantom: PhantomData<(E, EM, Z)>,
+    #[allow(clippy::type_complexity)]
+    phantom: PhantomData<(E, EM, I, M, Z)>,
 }
 
-impl<ST, E, EM, Z> ReusingEnergyStage<ST, E, EM, Z> {
+impl<ST, E, EM, I, M, Z> ReusingEnergyStage<ST, E, EM, I, M, Z> {
     #[must_use]
     pub fn new(inner: ST) -> Self {
         Self {
@@ -42,33 +75,61 @@ impl<ST, E, EM, Z> ReusingEnergyStage<ST, E, EM, Z> {
     }
 }
 
-impl<ST, E, EM, Z> UsesState for ReusingEnergyStage<ST, E, EM, Z>
+impl<ST, E, EM, I, M, Z> UsesState for ReusingEnergyStage<ST, E, EM, I, M, Z>
 where
     E: UsesState,
 {
     type State = E::State;
 }
 
-impl<ST, E, EM, Z> Stage<E, EM, Z> for ReusingEnergyStage<ST, E, EM, Z>
+impl<ST, E, EM, I, M, Z> MutationalStage<E, EM, I, M, Z>
+    for ReusingEnergyStage<ST, E, EM, I, M, Z>
 where
     E: UsesState,
     EM: UsesState<State = Self::State>,
-    Z: UsesState<State = Self::State>,
-    ST: Stage<E, EM, Z, State = Self::State>,
-    Self::State: HasCorpus + HasRand + HasMetadata,
+    Z: Evaluator<E, EM, State = Self::State>,
+    M: Mutator<I, Self::State>,
+    ST: MutationalStage<E, EM, I, M, Z, State = Self::State>,
+    Self::State: HasCorpus + HasRand + HasMetadata + HasCurrentTestcase<Self::Input>,
+    I: MutatedTransform<Self::Input, Self::State> + Clone,
+{
+    fn mutator(&self) -> &M {
+        self.inner.mutator()
+    }
+
+    fn mutator_mut(&mut self) -> &mut M {
+        self.inner.mutator_mut()
+    }
+
+    /// The inner stage's draw, rescaled by whether the current testcase is a
+    /// seed. [`FromSeed`] is set at load time and never afterwards, so this is
+    /// the only place the split exists.
+    fn iterations(&self, state: &mut Self::State) -> Result<usize, Error> {
+        let base = self.inner.iterations(state)?;
+        let from_seed = state.current_testcase()?.has_metadata::<FromSeed>();
+
+        Ok(scale(base, from_seed))
+    }
+}
+
+impl<ST, E, EM, I, M, Z> Stage<E, EM, Z> for ReusingEnergyStage<ST, E, EM, I, M, Z>
+where
+    E: UsesState,
+    EM: UsesState<State = Self::State>,
+    Z: Evaluator<E, EM, State = Self::State>,
+    M: Mutator<I, Self::State>,
+    ST: MutationalStage<E, EM, I, M, Z, State = Self::State>,
+    Self::State: HasCorpus + HasRand + HasMetadata + HasCurrentTestcase<Self::Input>,
+    I: MutatedTransform<Self::Input, Self::State> + Clone,
 {
     fn perform(
         &mut self,
-        _fuzzer: &mut Z,
-        _executor: &mut E,
-        _state: &mut Self::State,
-        _manager: &mut EM,
+        fuzzer: &mut Z,
+        executor: &mut E,
+        state: &mut Self::State,
+        manager: &mut EM,
     ) -> Result<(), Error> {
-        // Read FromSeed off the current testcase, then run the inner stage
-        // that many more or fewer times. Which of the two shapes this takes --
-        // repeating the inner stage, or reimplementing MutationalStage with
-        // our own iterations() -- is the one open question in this module.
-        todo!("scale by FromSeed, then delegate to self.inner")
+        self.perform_mutational(fuzzer, executor, state, manager)
     }
 
     fn should_restart(&mut self, state: &mut Self::State) -> Result<bool, Error> {
