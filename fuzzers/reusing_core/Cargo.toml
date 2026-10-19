@@ -12,4 +12,5 @@ edition = "2021"
 [dependencies]
 libafl = { path = "../../libafl/" }
 libafl_bolts = { path = "../../libafl_bolts/" }
+log = "0.4"
 serde = { version = "1.0", default-features = false, features = ["alloc", "derive"] }

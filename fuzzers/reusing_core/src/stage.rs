@@ -16,7 +16,7 @@
 //! Ported from `AFLplusplus_reusing/src/afl-fuzz-reusing.c` (`reusing_stage`).
 
 use core::{marker::PhantomData, ops::Range};
-use std::path::PathBuf;
+use std::{collections::HashMap, path::PathBuf};
 
 use libafl::{
     inputs::{HasMutatorBytes, Input},
@@ -40,6 +40,15 @@ pub struct ReusingStage<E, EM, Z> {
     dir: PathBuf,
     /// `value_pool.dict` and `unsolved_condition`, loaded once.
     pool: ReusingPool,
+    /// Testcase name back to the name the scan keyed the `.dtaint` by.
+    ///
+    /// LibAFL names a corpus entry by a hash of its bytes and drops the path
+    /// it was loaded from, so the name the stage sees is never the name the
+    /// scan saw. The fuzzer hands us the bridge: the same hash, computed over
+    /// each seed file at startup, mapped to that file's own name. An entry
+    /// not in the map -- every find -- just misses its `.dtaint`, which is
+    /// what a find should do.
+    seed_names: HashMap<String, String>,
     stats: StageStats,
     phantom: PhantomData<(E, EM, Z)>,
 }
@@ -47,6 +56,8 @@ pub struct ReusingStage<E, EM, Z> {
 /// What the stage has done so far, for the log.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct StageStats {
+    /// Times the stage was entered at all, whatever came of it.
+    pub calls: u64,
     /// Visits that found something to try.
     pub visits: u64,
     /// Target executions asked for.
@@ -58,16 +69,20 @@ pub struct StageStats {
 }
 
 impl<E, EM, Z> ReusingStage<E, EM, Z> {
-    /// Loads the scan's output from `dir`.
+    /// Loads the scan's output from `dir`. `seed_names` maps each seed's
+    /// LibAFL testcase name (`Input::generate_name`) to its filename, the key
+    /// the scan wrote the `.dtaint` under; see the field.
     ///
-    /// Fails loudly when it is not there: a campaign that quietly fuzzes
-    /// without its pool is indistinguishable from a baseline afterwards.
-    pub fn new(dir: PathBuf) -> Result<Self, Error> {
+    /// Fails loudly when the scan's output is not there: a campaign that
+    /// quietly fuzzes without its pool is indistinguishable from a baseline
+    /// afterwards.
+    pub fn new(dir: PathBuf, seed_names: HashMap<String, String>) -> Result<Self, Error> {
         let pool = ReusingPool::load(&dir).map_err(|e| Error::illegal_argument(e.to_string()))?;
 
         Ok(Self {
             dir,
             pool,
+            seed_names,
             stats: StageStats::default(),
             phantom: PhantomData,
         })
@@ -106,6 +121,23 @@ where
         state: &mut Self::State,
         manager: &mut EM,
     ) -> Result<(), Error> {
+        self.stats.calls += 1;
+
+        // The only trace a campaign leaves that the stage ran at all; the
+        // AFL++ arm has its UI counters, this has the log. At the entry, not
+        // after a successful visit, so a corpus that silently takes one of
+        // the early exits below still shows up as no_taint/retired counts.
+        if self.stats.calls % 200 == 1 {
+            log::info!(
+                "reusing: calls={} visits={} execs={} retired={} no_taint={}",
+                self.stats.calls,
+                self.stats.visits,
+                self.stats.execs,
+                self.stats.retired,
+                self.stats.no_taint
+            );
+        }
+
         let Some((map, mut cursors)) = self.taint_for_current(state)? else {
             return Ok(());
         };
@@ -135,6 +167,7 @@ where
         let total = remaining.min(budget);
 
         if total == 0 {
+            log::debug!("reusing: retired, nothing left in the pool for its sets");
             cursors.set_done();
             self.stats.retired += 1;
             return save_cursors(state, cursors);
@@ -228,25 +261,37 @@ impl<E, EM, Z> ReusingStage<E, EM, Z> {
             return Ok(None);
         }
 
-        // Keyed by the name the scan saw, which is the name the seed carried
-        // when it was imported.
+        // Keyed by the name the scan saw: the seed's own filename, recovered
+        // from the hash name LibAFL gave the testcase (see `seed_names`).
         let Some(name) = testcase.filename().clone() else {
+            log::debug!("reusing: testcase has no filename, skipped");
             return Ok(None);
         };
+        let name = self.seed_names.get(&name).cloned().unwrap_or(name);
 
         drop(testcase);
 
         // A seed with no .dtaint is normal, not an error: the scan writes no
         // file for an input the target had nothing taint-worthy to say about.
-        let Ok(mut map) = TaintMap::load(&self.dir, &name) else {
-            self.stats.no_taint += 1;
-            return Ok(None);
+        let mut map = match TaintMap::load(&self.dir, &name) {
+            Ok(map) => map,
+            Err(e) => {
+                log::debug!("reusing: {name}: no taint ({e:?})");
+                self.stats.no_taint += 1;
+                return Ok(None);
+            }
         };
 
         map.filter_unsolved(|site| self.pool.is_unsolved(site));
 
         let mut cursors = cursors;
         cursors.resize(map.n_all);
+
+        log::debug!(
+            "reusing: {name}: {} range sets ({} before the unsolved filter)",
+            map.sets.len(),
+            map.n_all
+        );
 
         Ok(Some((map, cursors)))
     }
