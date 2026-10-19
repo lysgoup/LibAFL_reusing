@@ -9,7 +9,7 @@ use libafl::{
     feedback_and_fast, feedback_or,
     feedbacks::{CrashFeedback, MaxMapFeedback, TimeFeedback},
     fuzzer::{Fuzzer, StdFuzzer},
-    inputs::BytesInput,
+    inputs::{BytesInput, Input},
     monitors::{SimpleMonitor, OnDiskTOMLMonitor},
     mutators::{scheduled::havoc_mutations, tokens_mutations, StdScheduledMutator, Tokens},
     observers::{CanTrack, HitcountsMapObserver, StdMapObserver, TimeObserver},
@@ -26,6 +26,7 @@ use libafl_bolts::{
 };
 use libafl_targets::EDGES_MAP_SIZE_IN_USE;
 use nix::sys::signal::Signal;
+use reusing_core::{FromSeed, ReusingEnergyStage, ReusingStage};
 
 /// The commandline args this fuzzer accepts
 #[derive(Debug, Parser)]
@@ -89,6 +90,15 @@ struct Opt {
         default_value = "./output"
     )]
     output_dir: PathBuf,
+
+    #[arg(
+        help = "Directory with the taint scan's output (value_pool.dict, \
+                unsolved_condition, the .dtaint files); enables the reusing \
+                stage and the energy split",
+        short = 'r',
+        long = "reusing-dir"
+    )]
+    reusing_dir: Option<PathBuf>,
 }
 
 #[allow(clippy::similar_names)]
@@ -210,9 +220,73 @@ pub fn main() {
     // Setup a mutational stage with a basic bytes mutator
     let mutator =
         StdScheduledMutator::with_max_stack_pow(havoc_mutations().merge(tokens_mutations()), 6);
-    let mut stages = tuple_list!(StdMutationalStage::new(mutator));
 
-    fuzzer
-        .fuzz_loop(&mut stages, &mut executor, &mut state, &mut mgr)
-        .expect("Error in the fuzzing loop");
+    if let Some(reusing_dir) = opt.reusing_dir {
+        // Everything in the corpus right now came in with the seeds: the
+        // energy split pays finds over seeds, and this mark is how it tells
+        // them apart. Loud failure on a missing scan dir for the same reason
+        // ReusingStage::new is loud: an arm quietly running without its pool
+        // is indistinguishable from the baseline afterwards.
+        let seed_ids: Vec<_> = state.corpus().ids().collect();
+        for id in seed_ids {
+            state
+                .corpus()
+                .get(id)
+                .unwrap()
+                .borrow_mut()
+                .add_metadata(FromSeed);
+        }
+
+        // The corpus names its entries by Input::generate_name, a hash of the
+        // bytes, and forgets the seed's own filename -- which is the key the
+        // scan wrote each .dtaint under. Hash every seed file the same way up
+        // front so the stage can translate back. A duplicate seed (same
+        // bytes, two names) keeps the first name; identical bytes got an
+        // identical .dtaint anyway.
+        let mut seed_names = std::collections::HashMap::new();
+        for dir in &corpus_dirs {
+            for entry in std::fs::read_dir(dir).expect("Failed to list the seed dir") {
+                let path = entry.expect("Failed to list the seed dir").path();
+                let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+                    continue;
+                };
+                let Ok(bytes) = std::fs::read(&path) else {
+                    continue;
+                };
+
+                seed_names
+                    .entry(BytesInput::new(bytes).generate_name(None))
+                    .or_insert_with(|| name.to_string());
+            }
+        }
+
+        let reusing_stage = ReusingStage::new(reusing_dir, seed_names)
+            .expect("Failed to load the taint scan's output");
+
+        // The one line that proves afterwards what this campaign loaded; the
+        // AFL++ arm keeps the same record as reusing_load.log.
+        let pool_stats = reusing_stage.pool().stats();
+        println!(
+            "Reusing pool loaded: {} entries ({} segments, {} patterns), {} unsolved sites, {} malformed lines",
+            pool_stats.entries,
+            pool_stats.segments,
+            pool_stats.patterns,
+            pool_stats.unsolved_sites,
+            pool_stats.malformed
+        );
+        let mut stages = tuple_list!(
+            reusing_stage,
+            ReusingEnergyStage::new(StdMutationalStage::new(mutator))
+        );
+
+        fuzzer
+            .fuzz_loop(&mut stages, &mut executor, &mut state, &mut mgr)
+            .expect("Error in the fuzzing loop");
+    } else {
+        let mut stages = tuple_list!(StdMutationalStage::new(mutator));
+
+        fuzzer
+            .fuzz_loop(&mut stages, &mut executor, &mut state, &mut mgr)
+            .expect("Error in the fuzzing loop");
+    }
 }
