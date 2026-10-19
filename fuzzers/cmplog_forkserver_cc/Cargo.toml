@@ -1,0 +1,41 @@
+[package]
+name = "cmplog_forkserver_cc"
+version = "0.1.0"
+edition = "2021"
+
+# The baseline forkserver fuzzer plus cmplog (RedQueen), nothing else: the
+# same scheduler, feedback and mutational stage as reusing_forkserver_cc's
+# baseline arm, with upstream's fuzzbench_forkserver_cmplog tracing/RedQueen
+# block inserted in front of havoc. A third arm for the comparison, so the
+# difference against the baseline is exactly cmplog.
+
+[features]
+default = ["std"]
+std = []
+# Forces a crash
+crash = []
+
+[profile.release]
+lto = true
+codegen-units = 1
+opt-level = 3
+debug = true
+
+[build-dependencies]
+cc = { version = "1.0", features = ["parallel"] }
+which = { version = "6.0" }
+
+[dependencies]
+clap = { version = "4.0", features = ["derive"] }
+nix = { version = "0.29", features = ["signal"] }
+libafl = { path = "../../libafl/", features = ["track_hit_feedbacks"] }
+libafl_bolts = { path = "../../libafl_bolts/" }
+libafl_cc = { path = "../../libafl_cc/" }
+libafl_targets = { path = "../../libafl_targets/", features = ["sancov_pcguard_hitcounts", "libfuzzer", "pointer_maps", "sancov_cmplog"] }
+mimalloc = { version = "*", default-features = false }
+env_logger = "*"
+log = "*"
+
+[lib]
+name = "libforkserver_libafl_cc"
+crate-type = ["staticlib"]
