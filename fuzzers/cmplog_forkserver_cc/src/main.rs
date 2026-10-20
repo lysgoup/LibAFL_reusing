@@ -39,11 +39,11 @@ use libafl_bolts::{
     tuples::{tuple_list, Handled, Merge},
     AsSliceMut, Truncate,
 };
-use libafl_targets::{
-    cmps::{observers::AFLppCmpLogObserver, stages::AFLppCmplogTracingStage},
-    AFLppCmpLogMap, EDGES_MAP_SIZE_IN_USE,
-};
+use libafl_targets::EDGES_MAP_SIZE_IN_USE;
 use nix::sys::signal::Signal;
+
+mod aflpp_cmplog;
+use aflpp_cmplog::{AFLppCmpLogMap, AFLppCmpLogObserver, AFLppCmplogTracingStage};
 
 /// The commandline args this fuzzer accepts
 #[derive(Debug, Parser)]
