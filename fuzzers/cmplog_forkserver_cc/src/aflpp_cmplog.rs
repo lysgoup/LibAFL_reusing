@@ -18,7 +18,8 @@ use std::{
 
 use libafl::{
     executors::{Executor, ExitKind, HasObservers},
-    inputs::{BytesInput, UsesInput},
+    inputs::{BytesInput, HasMutatorBytes, UsesInput},
+    mutators::MultiMutator,
     observers::{
         cmp::{
             AFLppCmpLogHeader, AFLppCmpValuesMetadata, CmpMap, CmpObserver, CmpObserverMetadata,
@@ -26,9 +27,13 @@ use libafl::{
         },
         Observer, ObserversTuple,
     },
-    stages::{colorization::TaintMetadata, RetryCountRestartHelper, Stage},
-    state::{HasCorpus, HasCurrentTestcase, HasExecutions, UsesState},
-    Error, HasMetadata, HasNamedMetadata,
+    stages::{
+        colorization::TaintMetadata,
+        mutational::{MutatedTransform, MutatedTransformPost},
+        RetryCountRestartHelper, Stage,
+    },
+    state::{HasCorpus, HasCurrentTestcase, HasExecutions, HasRand, UsesState},
+    Error, Evaluator, HasMetadata, HasNamedMetadata,
 };
 use libafl_bolts::{
     ownedref::OwnedRefMut,
@@ -379,6 +384,125 @@ impl<'a> CmpObserverMetadata<'a, AFLppCmpLogMap> for AFLppCmpValuesMetadata {
                     self.new_cmpvals.insert(cmpmap_idx, cmp_values);
                 }
             }
+        }
+    }
+}
+
+/// How many bytes the generated-mutant buffer may hold per testcase.
+///
+/// Upstream's `MultiMutationalStage` passes `max_count: None` to
+/// [`MultiMutator::multi_mutate`], and `AFLppRedQueen` then materializes one
+/// full copy of the input per candidate -- sites x hits x input positions --
+/// before anything runs. On this experiment's saturated corpora (inputs up to
+/// 1 MiB, a correctly-read 144 MiB cmp map) that buffer reached 166 GiB per
+/// campaign and OOMed the box. AFL++'s own redqueen enumerates the same
+/// candidates but executes each patch in place and keeps O(1) memory, so a
+/// cap here is not a departure from AFL++, it is the batch-API tax.
+///
+/// A byte budget rather than a count: the cap `multi_mutate` takes is this
+/// divided by the input size, so a jq-sized input (~18 KiB) keeps upstream
+/// behavior in practice (~230k candidates) while a 1 MiB lame input is held
+/// to ~4096 -- constant memory either way.
+const REDQUEEN_MUTANT_BYTES: usize = 4 << 30;
+
+/// Upstream's `MultiMutationalStage` with the one change described on
+/// [`REDQUEEN_MUTANT_BYTES`]: `multi_mutate` gets a cap instead of `None`.
+#[derive(Clone, Debug)]
+pub struct CappedMultiMutationalStage<E, EM, I, M, Z> {
+    name: Cow<'static, str>,
+    mutator: M,
+    #[allow(clippy::type_complexity)]
+    phantom: PhantomData<(E, EM, I, Z)>,
+}
+
+/// The unique id for the capped multi mutational stage
+static mut CAPPED_MULTI_MUTATIONAL_STAGE_ID: usize = 0;
+/// The name for the capped multi mutational stage
+pub static CAPPED_MULTI_MUTATIONAL_STAGE_NAME: &str = "cappedmultimutational";
+
+impl<E, EM, I, M, Z> UsesState for CappedMultiMutationalStage<E, EM, I, M, Z>
+where
+    Z: UsesState,
+{
+    type State = Z::State;
+}
+
+impl<E, EM, I, M, Z> Named for CappedMultiMutationalStage<E, EM, I, M, Z> {
+    fn name(&self) -> &Cow<'static, str> {
+        &self.name
+    }
+}
+
+impl<E, EM, I, M, Z> Stage<E, EM, Z> for CappedMultiMutationalStage<E, EM, I, M, Z>
+where
+    E: UsesState<State = Self::State>,
+    EM: UsesState<State = Self::State>,
+    M: MultiMutator<I, Self::State>,
+    Z: Evaluator<E, EM>,
+    Self::State: HasCorpus + HasRand + HasNamedMetadata,
+    I: MutatedTransform<Self::Input, Self::State> + Clone + HasMutatorBytes,
+{
+    #[inline]
+    fn should_restart(&mut self, state: &mut Self::State) -> Result<bool, Error> {
+        // Make sure we don't get stuck crashing on a single testcase
+        RetryCountRestartHelper::should_restart(state, &self.name, 3)
+    }
+
+    #[inline]
+    fn clear_progress(&mut self, state: &mut Self::State) -> Result<(), Error> {
+        RetryCountRestartHelper::clear_progress(state, &self.name)
+    }
+
+    #[inline]
+    fn perform(
+        &mut self,
+        fuzzer: &mut Z,
+        executor: &mut E,
+        state: &mut Self::State,
+        manager: &mut EM,
+    ) -> Result<(), Error> {
+        let mut testcase = state.current_testcase_mut()?;
+        let Ok(input) = I::try_transform_from(&mut testcase, state) else {
+            return Ok(());
+        };
+        drop(testcase);
+
+        // The one line upstream has as `None`.
+        let max_count = REDQUEEN_MUTANT_BYTES / input.bytes().len().max(1);
+        let generated = self.mutator.multi_mutate(state, &input, Some(max_count))?;
+
+        for new_input in generated {
+            // Time is measured directly the `evaluate_input` function
+            let (untransformed, post) = new_input.try_transform_into(state)?;
+            let (_, corpus_id) = fuzzer.evaluate_input(state, executor, manager, untransformed)?;
+            self.mutator.multi_post_exec(state, corpus_id)?;
+            post.post_exec(state, corpus_id)?;
+        }
+
+        Ok(())
+    }
+}
+
+impl<E, EM, M, Z> CappedMultiMutationalStage<E, EM, Z::Input, M, Z>
+where
+    Z: UsesState,
+{
+    /// Creates a new [`CappedMultiMutationalStage`]
+    pub fn new(mutator: M) -> Self {
+        // unsafe but impossible that you create two threads both instantiating this instance
+        let stage_id = unsafe {
+            let ret = CAPPED_MULTI_MUTATIONAL_STAGE_ID;
+            CAPPED_MULTI_MUTATIONAL_STAGE_ID += 1;
+            ret
+        };
+        Self {
+            name: Cow::Owned(
+                CAPPED_MULTI_MUTATIONAL_STAGE_NAME.to_owned()
+                    + ":"
+                    + stage_id.to_string().as_str(),
+            ),
+            mutator,
+            phantom: PhantomData,
         }
     }
 }

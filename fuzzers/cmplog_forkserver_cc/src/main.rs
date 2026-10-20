@@ -26,7 +26,7 @@ use libafl::{
     observers::{CanTrack, HitcountsMapObserver, StdMapObserver, TimeObserver},
     schedulers::{IndexesLenTimeMinimizerScheduler, QueueScheduler},
     stages::{
-        mutational::{MultiMutationalStage, StdMutationalStage},
+        mutational::StdMutationalStage,
         ColorizationStage, IfStage,
     },
     state::{HasCorpus, HasCurrentTestcase, StdState},
@@ -43,7 +43,9 @@ use libafl_targets::EDGES_MAP_SIZE_IN_USE;
 use nix::sys::signal::Signal;
 
 mod aflpp_cmplog;
-use aflpp_cmplog::{AFLppCmpLogMap, AFLppCmpLogObserver, AFLppCmplogTracingStage};
+use aflpp_cmplog::{
+    AFLppCmpLogMap, AFLppCmpLogObserver, AFLppCmplogTracingStage, CappedMultiMutationalStage,
+};
 
 /// The commandline args this fuzzer accepts
 #[derive(Debug, Parser)]
@@ -269,7 +271,7 @@ pub fn main() {
         let tracing = AFLppCmplogTracingStage::new(cmplog_executor, cmplog_ref);
 
         // Setup a randomic Input2State stage
-        let rq = MultiMutationalStage::new(AFLppRedQueen::with_cmplog_options(true, true));
+        let rq = CappedMultiMutationalStage::new(AFLppRedQueen::with_cmplog_options(true, true));
 
         // Upstream runs the cmplog pipeline on an entry's second schedule:
         // the first visit calibrates nothing here, but keeping the gate the
