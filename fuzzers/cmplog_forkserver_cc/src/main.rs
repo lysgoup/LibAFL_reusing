@@ -6,13 +6,13 @@
 //! tracing run against a cmplog-instrumented build of the target, then
 //! AFL++'s RedQueen input-to-state mutator. Without `-c` it IS the baseline.
 
-use core::time::Duration;
+use core::{ptr::addr_of_mut, time::Duration};
 use std::path::PathBuf;
 
 use clap::Parser;
 use libafl::{
     corpus::{Corpus, OnDiskCorpus},
-    events::SimpleEventManager,
+    events::{SimpleEventManager, EVENTMGR_SIGHANDLER_STATE},
     executors::{forkserver::ForkserverExecutor, HasObservers},
     feedback_and_fast, feedback_or,
     feedbacks::{CrashFeedback, MaxMapFeedback, TimeFeedback},
@@ -33,6 +33,7 @@ use libafl::{
     Error, HasMetadata,
 };
 use libafl_bolts::{
+    os::unix_signals::setup_signal_handler,
     ownedref::OwnedRefMut,
     rands::StdRand,
     shmem::{ShMem, ShMemProvider, UnixShMemProvider},
@@ -121,6 +122,14 @@ struct Opt {
 #[allow(clippy::similar_names)]
 pub fn main() {
     env_logger::init();
+
+    // The harness launches this as a shell background job, which starts it
+    // with SIGINT and SIGQUIT ignored; SimpleEventManager installs nothing, so
+    // SIGINT (archive_campaigns.sh, `timeout --signal=INT`, docker stop via
+    // entrypoint.sh's trap) would never stop it. LibAFL's own shutdown handler
+    // exits on SIGINT/SIGTERM/SIGQUIT with CTRL_C_EXIT.
+    unsafe { setup_signal_handler(addr_of_mut!(EVENTMGR_SIGHANDLER_STATE)) }
+        .expect("Failed to install the shutdown signal handler");
 
     const MAP_SIZE: usize = EDGES_MAP_SIZE_IN_USE;
     let opt = Opt::parse();
