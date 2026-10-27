@@ -24,6 +24,7 @@ use libafl::{
     state::{HasCorpus, HasCurrentTestcase, HasRand, UsesState},
     Error, Evaluator, HasMetadata,
 };
+use libafl_bolts::rands::Rand;
 
 use crate::{
     dtaint::TaintMap,
@@ -49,8 +50,31 @@ pub struct ReusingStage<E, EM, Z> {
     /// not in the map -- every find -- just misses its `.dtaint`, which is
     /// what a find should do.
     seed_names: HashMap<String, String>,
+    ablation: Ablation,
     stats: StageStats,
     phantom: PhantomData<(E, EM, Z)>,
+}
+
+/// Which piece of the stage an ablation campaign removes. [`None`](Ablation::None)
+/// is the stage as designed; everything else exists only to measure what one
+/// ingredient contributes, and is selected per campaign on the command line.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Ablation {
+    /// The real stage: pool values written over the ranges the taint saw.
+    #[default]
+    None,
+    /// Keep everything -- the pool values, their order, the budget, the
+    /// cursors, the energy split -- but write each value at a uniformly
+    /// random offset of the same width instead of the tainted ranges. The
+    /// difference between this arm and the real one is exactly the taint's
+    /// positional information.
+    RandomPositions,
+    /// The mirror image: write at exactly the tainted ranges, but random
+    /// bytes of the pool value's lengths instead of the value. The pool still
+    /// drives the schedule -- one try per entry, same order, same budget --
+    /// so the difference between this arm and the real one is exactly the
+    /// values the scan collected.
+    RandomValues,
 }
 
 /// What the stage has done so far, for the log.
@@ -83,9 +107,22 @@ impl<E, EM, Z> ReusingStage<E, EM, Z> {
             dir,
             pool,
             seed_names,
+            ablation: Ablation::default(),
             stats: StageStats::default(),
             phantom: PhantomData,
         })
+    }
+
+    /// Selects an ablation; the default is the stage as designed.
+    #[must_use]
+    pub fn with_ablation(mut self, ablation: Ablation) -> Self {
+        self.ablation = ablation;
+        self
+    }
+
+    #[must_use]
+    pub fn ablation(&self) -> Ablation {
+        self.ablation
     }
 
     #[must_use]
@@ -192,9 +229,32 @@ where
                     let Some(entry) = live.next_entry() else { break };
                     progressed = true;
 
-                    apply(scratch.bytes_mut(), live.ranges, &entry.segs);
+                    // The ablations each redraw exactly one ingredient of
+                    // this write -- RandomPositions WHERE it lands,
+                    // RandomValues WHAT is written -- and leave the other,
+                    // plus the order and the budget, untouched. So each arm
+                    // differs from the real one by that single ingredient.
+                    let rand_ranges;
+                    let rand_segs;
+                    let (ranges, segs): (&[Range<u32>], &[Vec<u8>]) = match self.ablation {
+                        Ablation::None => (live.ranges, &entry.segs),
+                        Ablation::RandomPositions => {
+                            rand_ranges = random_ranges_like(
+                                live.ranges,
+                                scratch.bytes().len(),
+                                state.rand_mut(),
+                            );
+                            (&rand_ranges, &entry.segs)
+                        }
+                        Ablation::RandomValues => {
+                            rand_segs = random_segs_like(&entry.segs, state.rand_mut());
+                            (live.ranges, &rand_segs)
+                        }
+                    };
+
+                    apply(scratch.bytes_mut(), ranges, segs);
                     fuzzer.evaluate_input(state, executor, manager, scratch.clone())?;
-                    restore(scratch.bytes_mut(), original.bytes(), live.ranges);
+                    restore(scratch.bytes_mut(), original.bytes(), ranges);
 
                     cursors.advance(live.set_idx);
                     spent += 1;
@@ -326,6 +386,38 @@ where
 {
     state.current_testcase_mut()?.add_metadata(cursors);
     Ok(())
+}
+
+/// Ranges of the same widths as `like`, each at a uniformly random offset:
+/// the [`Ablation::RandomPositions`] stand-in for a `.dtaint` range set.
+///
+/// A width the input cannot hold becomes a range starting at the end of the
+/// buffer, which [`apply`] and [`restore`] then skip -- the same thing they
+/// do when a real range runs past a short input.
+pub fn random_ranges_like<R: Rand>(
+    like: &[Range<u32>],
+    input_len: usize,
+    rand: &mut R,
+) -> Vec<Range<u32>> {
+    like.iter()
+        .map(|r| {
+            let w = (r.end - r.start) as usize;
+            if w == 0 || w > input_len {
+                let at = input_len as u32;
+                return at..at + r.end - r.start;
+            }
+            let at = rand.below(input_len - w + 1) as u32;
+            at..at + w as u32
+        })
+        .collect()
+}
+
+/// Segments of the same lengths as `like`, filled with uniformly random
+/// bytes: the [`Ablation::RandomValues`] stand-in for a pool entry's value.
+pub fn random_segs_like<R: Rand>(like: &[Vec<u8>], rand: &mut R) -> Vec<Vec<u8>> {
+    like.iter()
+        .map(|seg| (0..seg.len()).map(|_| rand.below(256) as u8).collect())
+        .collect()
 }
 
 /// Writes one pool entry's segments over a range set's ranges.

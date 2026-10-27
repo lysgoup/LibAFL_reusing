@@ -27,7 +27,7 @@ pub mod stage;
 pub use energy::ReusingEnergyStage;
 pub use meta::{FromSeed, ReusingCursors};
 pub use pool::ReusingPool;
-pub use stage::ReusingStage;
+pub use stage::{Ablation, ReusingStage};
 
 /// How many pool values one range set gets before the stage moves to the next.
 ///

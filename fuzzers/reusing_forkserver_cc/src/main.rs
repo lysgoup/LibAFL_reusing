@@ -27,7 +27,7 @@ use libafl_bolts::{
 };
 use libafl_targets::EDGES_MAP_SIZE_IN_USE;
 use nix::sys::signal::Signal;
-use reusing_core::{FromSeed, ReusingEnergyStage, ReusingStage};
+use reusing_core::{Ablation, FromSeed, ReusingEnergyStage, ReusingStage};
 
 /// The commandline args this fuzzer accepts
 #[derive(Debug, Parser)]
@@ -100,6 +100,17 @@ struct Opt {
         long = "reusing-dir"
     )]
     reusing_dir: Option<PathBuf>,
+
+    #[arg(
+        help = "Ablation for the reusing stage (needs -r). 'random-pos' writes \
+                each pool value at a random offset of the same width instead \
+                of the tainted ranges; 'random-val' writes random bytes of the \
+                value's lengths at exactly the tainted ranges. Order, budget \
+                and the energy split stay as designed either way",
+        long = "reusing-ablation",
+        value_parser = ["random-pos", "random-val"]
+    )]
+    reusing_ablation: Option<String>,
 }
 
 #[allow(clippy::similar_names)]
@@ -269,19 +280,28 @@ pub fn main() {
             }
         }
 
-        let reusing_stage = ReusingStage::new(reusing_dir, seed_names)
-            .expect("Failed to load the taint scan's output");
+        let ablation = match opt.reusing_ablation.as_deref() {
+            Some("random-pos") => Ablation::RandomPositions,
+            Some("random-val") => Ablation::RandomValues,
+            _ => Ablation::None,
+        };
 
-        // The one line that proves afterwards what this campaign loaded; the
-        // AFL++ arm keeps the same record as reusing_load.log.
+        let reusing_stage = ReusingStage::new(reusing_dir, seed_names)
+            .expect("Failed to load the taint scan's output")
+            .with_ablation(ablation);
+
+        // The one line that proves afterwards what this campaign loaded and
+        // which arm it really was; the AFL++ arm keeps the same record as
+        // reusing_load.log.
         let pool_stats = reusing_stage.pool().stats();
         println!(
-            "Reusing pool loaded: {} entries ({} segments, {} patterns), {} unsolved sites, {} malformed lines",
+            "Reusing pool loaded: {} entries ({} segments, {} patterns), {} unsolved sites, {} malformed lines, ablation={:?}",
             pool_stats.entries,
             pool_stats.segments,
             pool_stats.patterns,
             pool_stats.unsolved_sites,
-            pool_stats.malformed
+            pool_stats.malformed,
+            reusing_stage.ablation()
         );
         let mut stages = tuple_list!(
             reusing_stage,

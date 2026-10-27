@@ -140,3 +140,90 @@ fn range_set_shapes_find_pool_buckets() {
 
     assert!(sets_live > 0, "no range set matched any pool entry -- the two sides disagree");
 }
+
+/* ------------------------------------------------- random-position ablation */
+
+mod ablation {
+    use core::ops::Range;
+
+    use libafl_bolts::rands::{Rand, StdRand};
+    use reusing_core::stage::random_ranges_like;
+
+    /// The stand-in ranges must keep the shape -- same count, same widths --
+    /// or the pool values would no longer fit what they are written over.
+    #[test]
+    fn widths_and_count_are_preserved() {
+        let like: Vec<Range<u32>> = vec![8..12, 20..22, 40..41];
+        let mut rand = StdRand::with_seed(7);
+
+        for _ in 0..100 {
+            let got = random_ranges_like(&like, 64, &mut rand);
+            assert_eq!(got.len(), like.len());
+            for (g, l) in got.iter().zip(&like) {
+                assert_eq!(g.end - g.start, l.end - l.start);
+                assert!(g.end as usize <= 64);
+            }
+        }
+    }
+
+    /// A width the input cannot hold comes back past the end of the buffer,
+    /// where apply/restore skip it -- the same as a real out-of-range set.
+    #[test]
+    fn an_oversized_width_is_pushed_out_of_bounds() {
+        let like: Vec<Range<u32>> = vec![0..9];
+        let mut rand = StdRand::with_seed(7);
+
+        let got = random_ranges_like(&like, 4, &mut rand);
+        assert_eq!(got[0].end - got[0].start, 9);
+        assert!(got[0].start as usize >= 4);
+    }
+
+    /// The offsets actually move: on a buffer much larger than the width,
+    /// 100 draws landing on one spot would mean the rand is not wired in.
+    #[test]
+    fn offsets_vary() {
+        let like: Vec<Range<u32>> = vec![0..4];
+        let mut rand = StdRand::with_seed(7);
+
+        let mut starts = std::collections::HashSet::new();
+        for _ in 0..100 {
+            starts.insert(random_ranges_like(&like, 4096, &mut rand)[0].start);
+        }
+        assert!(starts.len() > 10);
+    }
+}
+
+mod ablation_values {
+    use libafl_bolts::rands::StdRand;
+    use reusing_core::stage::random_segs_like;
+
+    /// The stand-in segments must keep count and lengths, or they would no
+    /// longer fit the ranges they are written over.
+    #[test]
+    fn lengths_and_count_are_preserved() {
+        let like: Vec<Vec<u8>> = vec![vec![1, 2, 3, 4], vec![9, 9], vec![7]];
+        let mut rand = StdRand::with_seed(7);
+
+        for _ in 0..100 {
+            let got = random_segs_like(&like, &mut rand);
+            assert_eq!(got.len(), like.len());
+            for (g, l) in got.iter().zip(&like) {
+                assert_eq!(g.len(), l.len());
+            }
+        }
+    }
+
+    /// The bytes actually vary: 100 draws of a 4-byte segment collapsing to
+    /// one value would mean the rand is not wired in.
+    #[test]
+    fn bytes_vary() {
+        let like: Vec<Vec<u8>> = vec![vec![0; 4]];
+        let mut rand = StdRand::with_seed(7);
+
+        let mut seen = std::collections::HashSet::new();
+        for _ in 0..100 {
+            seen.insert(random_segs_like(&like, &mut rand)[0].clone());
+        }
+        assert!(seen.len() > 10);
+    }
+}
