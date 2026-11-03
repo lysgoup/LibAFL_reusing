@@ -210,6 +210,13 @@ where
             return save_cursors(state, cursors);
         }
 
+        // On the testcase from here on, and advanced there before each try
+        // runs: an in-process fuzzer that crashes or times out on a try comes
+        // back from the state it serialized at that moment, resumes this stage
+        // on this testcase, and must find the cursor already past that try --
+        // or it replays the same try and crashes on it forever.
+        save_cursors(state, cursors)?;
+
         let original = state.current_input_cloned()?;
         let mut scratch = original.clone();
         let mut spent = 0usize;
@@ -252,11 +259,12 @@ where
                         }
                     };
 
+                    advance_saved_cursor(state, live.set_idx)?;
+
                     apply(scratch.bytes_mut(), ranges, segs);
                     fuzzer.evaluate_input(state, executor, manager, scratch.clone())?;
                     restore(scratch.bytes_mut(), original.bytes(), ranges);
 
-                    cursors.advance(live.set_idx);
                     spent += 1;
                 }
             }
@@ -275,16 +283,22 @@ where
         // find nothing. Compared against the budget this visit actually got,
         // not against the constant it came from.
         if remaining <= total {
-            cursors.set_done();
+            state
+                .current_testcase_mut()?
+                .metadata_mut::<ReusingCursors>()?
+                .set_done();
             self.stats.retired += 1;
         }
 
-        save_cursors(state, cursors)
+        Ok(())
     }
 
     fn should_restart(&mut self, _state: &mut Self::State) -> Result<bool, Error> {
-        // Cursors live on the testcase and only ever move forward, so a
-        // restart resumes correctly with no extra tracking.
+        // Cursors live on the testcase, move past a try before it runs, and
+        // never move back, so a restart resumes after the try that killed the
+        // process with no extra tracking. Every restart has spent at least
+        // that one try, so a testcase whose tries keep crashing still runs
+        // out of them.
         Ok(true)
     }
 
@@ -385,6 +399,20 @@ where
     I: Input,
 {
     state.current_testcase_mut()?.add_metadata(cursors);
+    Ok(())
+}
+
+/// Moves one range set's cursor on the testcase itself, in place: once per
+/// try, so no copy of the whole array.
+fn advance_saved_cursor<S, I>(state: &mut S, set_idx: usize) -> Result<(), Error>
+where
+    S: HasCurrentTestcase<I> + HasMetadata,
+    I: Input,
+{
+    state
+        .current_testcase_mut()?
+        .metadata_mut::<ReusingCursors>()?
+        .advance(set_idx);
     Ok(())
 }
 

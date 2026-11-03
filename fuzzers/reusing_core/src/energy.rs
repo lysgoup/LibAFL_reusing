@@ -47,10 +47,19 @@ use crate::{meta::FromSeed, NEW_ENERGY_MULT, SEED_ENERGY_DIV};
 /// boost at `havoc_max_mult * 100 * REUSING_NEW_ENERGY_MULT`.
 #[must_use]
 pub fn scale(base: usize, from_seed: bool) -> usize {
+    scale_capped(base, from_seed, DEFAULT_MUTATIONAL_MAX_ITERATIONS)
+}
+
+/// [`scale`] for an inner stage whose ordinary ceiling is `max_base` rather
+/// than `StdMutationalStage`'s: a power stage draws up to
+/// `HAVOC_MAX_MULT * 100`, and capping its finds at 128 times the mult would
+/// pay them less than the baseline arm pays them.
+#[must_use]
+pub fn scale_capped(base: usize, from_seed: bool, max_base: usize) -> usize {
     if from_seed {
         (base / SEED_ENERGY_DIV).max(1)
     } else {
-        (base * NEW_ENERGY_MULT).min(DEFAULT_MUTATIONAL_MAX_ITERATIONS * NEW_ENERGY_MULT)
+        (base * NEW_ENERGY_MULT).min(max_base * NEW_ENERGY_MULT)
     }
 }
 
@@ -61,6 +70,8 @@ pub fn scale(base: usize, from_seed: bool) -> usize {
 #[derive(Debug)]
 pub struct ReusingEnergyStage<ST, E, EM, I, M, Z> {
     inner: ST,
+    /// The inner stage's own ceiling on one draw; see [`scale_capped`].
+    max_base: usize,
     #[allow(clippy::type_complexity)]
     phantom: PhantomData<(E, EM, I, M, Z)>,
 }
@@ -70,8 +81,17 @@ impl<ST, E, EM, I, M, Z> ReusingEnergyStage<ST, E, EM, I, M, Z> {
     pub fn new(inner: ST) -> Self {
         Self {
             inner,
+            max_base: DEFAULT_MUTATIONAL_MAX_ITERATIONS,
             phantom: PhantomData,
         }
+    }
+
+    /// For an inner stage that can draw more than `StdMutationalStage`'s
+    /// 128, such as a power stage; see [`scale_capped`].
+    #[must_use]
+    pub fn with_max_base(mut self, max_base: usize) -> Self {
+        self.max_base = max_base;
+        self
     }
 }
 
@@ -108,7 +128,7 @@ where
         let base = self.inner.iterations(state)?;
         let from_seed = state.current_testcase()?.has_metadata::<FromSeed>();
 
-        Ok(scale(base, from_seed))
+        Ok(scale_capped(base, from_seed, self.max_base))
     }
 }
 
