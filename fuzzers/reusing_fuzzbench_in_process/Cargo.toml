@@ -8,6 +8,9 @@ edition = "2021"
 default = ["std"]
 std = []
 no_link_main = ["libafl_targets/libfuzzer_no_link_main"]
+# Drops the cmplog stages (tracing, i2s): the reusing stage on top of the
+# same fuzzer with nothing else added, as in the unibench arm and StorFuzz.
+no_cmplog = []
 
 [profile.release]
 lto = true

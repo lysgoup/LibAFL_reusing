@@ -26,20 +26,19 @@ use libafl::{
     fuzzer::{Fuzzer, StdFuzzer},
     inputs::{BytesInput, HasTargetBytes, Input},
     monitors::{SimpleMonitor, OnDiskTOMLMonitor},
-    mutators::{
-        scheduled::havoc_mutations, token_mutations::I2SRandReplace, tokens_mutations,
-        StdMOptMutator, StdScheduledMutator, Tokens,
-    },
+    mutators::{scheduled::havoc_mutations, tokens_mutations, StdMOptMutator, Tokens},
     observers::{CanTrack, HitcountsMapObserver, TimeObserver},
     schedulers::{
         powersched::PowerSchedule, IndexesLenTimeMinimizerScheduler, StdWeightedScheduler,
     },
-    stages::{
-        calibrate::CalibrationStage, power::StdPowerMutationalStage, StdMutationalStage,
-        TracingStage,
-    },
+    stages::{calibrate::CalibrationStage, power::StdPowerMutationalStage},
     state::{HasCorpus, StdState},
     Error, HasMetadata,
+};
+#[cfg(not(feature = "no_cmplog"))]
+use libafl::{
+    mutators::{token_mutations::I2SRandReplace, StdScheduledMutator},
+    stages::{StdMutationalStage, TracingStage},
 };
 use libafl_bolts::{
     current_time,
@@ -51,9 +50,9 @@ use libafl_bolts::{
 };
 #[cfg(any(target_os = "linux", target_vendor = "apple"))]
 use libafl_targets::autotokens;
-use libafl_targets::{
-    libfuzzer_initialize, libfuzzer_test_one_input, std_edges_map_observer, CmpLogObserver,
-};
+use libafl_targets::{libfuzzer_initialize, libfuzzer_test_one_input, std_edges_map_observer};
+#[cfg(not(feature = "no_cmplog"))]
+use libafl_targets::CmpLogObserver;
 #[cfg(unix)]
 use nix::unistd::dup;
 use reusing_core::{Ablation, FromSeed, ReusingEnergyStage, ReusingStage};
@@ -313,6 +312,7 @@ fn fuzz(
     // Create an observation channel to keep track of the execution time
     let time_observer = TimeObserver::new("time");
 
+    #[cfg(not(feature = "no_cmplog"))]
     let cmplog_observer = CmpLogObserver::new("cmplog", true);
 
     let map_feedback = MaxMapFeedback::new(&edges_observer);
@@ -360,6 +360,7 @@ fn fuzz(
     }
 
     // Setup a randomic Input2State stage
+    #[cfg(not(feature = "no_cmplog"))]
     let i2s = StdMutationalStage::new(StdScheduledMutator::new(tuple_list!(I2SRandReplace::new())));
 
     // Setup a MOPT mutator
@@ -389,6 +390,7 @@ fn fuzz(
         ExitKind::Ok
     };
 
+    #[cfg(not(feature = "no_cmplog"))]
     let mut tracing_harness = harness;
 
     // Create the executor for an in-process function with one observer for edge coverage and one for the execution time
@@ -402,6 +404,7 @@ fn fuzz(
     )?;
 
     // Setup a tracing stage in which we log comparisons
+    #[cfg(not(feature = "no_cmplog"))]
     let tracing = TracingStage::new(
         InProcessExecutor::with_timeout(
             &mut tracing_harness,
@@ -436,7 +439,10 @@ fn fuzz(
     let power = ReusingEnergyStage::new(power).with_max_base(POWER_MAX_ITERATIONS);
 
     // The order of the stages matter!
+    #[cfg(not(feature = "no_cmplog"))]
     let mut stages = tuple_list!(calibration, tracing, i2s, reusing, power);
+    #[cfg(feature = "no_cmplog")]
+    let mut stages = tuple_list!(calibration, reusing, power);
 
     // Read tokens
     if state.metadata_map().get::<Tokens>().is_none() {
