@@ -27,7 +27,9 @@ use libafl_bolts::{
 };
 use libafl_targets::EDGES_MAP_SIZE_IN_USE;
 use nix::sys::signal::Signal;
-use reusing_core::{Ablation, FromSeed, ReusingEnergyStage, ReusingStage};
+use reusing_core::{
+    Ablation, FromSeed, OriginFeedback, OriginMutator, ReusingEnergyStage, ReusingStage, StageLabel,
+};
 
 /// The commandline args this fuzzer accepts
 #[derive(Debug, Parser)]
@@ -153,9 +155,12 @@ pub fn main() {
     let time_observer = TimeObserver::new("time");
 
     // Feedback to rate the interestingness of an input
+    // OriginFeedback never decides anything; it records where each new entry
+    // came from (reusing_core::origin) into the entry's .metadata.
     let mut feedback = feedback_or!(
         MaxMapFeedback::new(&edges_observer),
-        TimeFeedback::new(&time_observer)
+        TimeFeedback::new(&time_observer),
+        OriginFeedback::new()
     );
 
     // A feedback to choose if an input is a solution or not
@@ -238,8 +243,12 @@ pub fn main() {
     state.add_metadata(tokens);
 
     // Setup a mutational stage with a basic bytes mutator
-    let mutator =
-        StdScheduledMutator::with_max_stack_pow(havoc_mutations().merge(tokens_mutations()), 6);
+    // OriginMutator draws what StdScheduledMutator would and names the
+    // mutations it applied, for the Origin of whatever they find.
+    let mutator = OriginMutator::new(StdScheduledMutator::with_max_stack_pow(
+        havoc_mutations().merge(tokens_mutations()),
+        6,
+    ));
 
     if let Some(reusing_dir) = opt.reusing_dir {
         // Everything in the corpus right now came in with the seeds: the
@@ -304,15 +313,15 @@ pub fn main() {
             reusing_stage.ablation()
         );
         let mut stages = tuple_list!(
-            reusing_stage,
-            ReusingEnergyStage::new(StdMutationalStage::new(mutator))
+            StageLabel::new("reusing", reusing_stage),
+            StageLabel::new("havoc", ReusingEnergyStage::new(StdMutationalStage::new(mutator)))
         );
 
         fuzzer
             .fuzz_loop(&mut stages, &mut executor, &mut state, &mut mgr)
             .expect("Error in the fuzzing loop");
     } else {
-        let mut stages = tuple_list!(StdMutationalStage::new(mutator));
+        let mut stages = tuple_list!(StageLabel::new("havoc", StdMutationalStage::new(mutator)));
 
         fuzzer
             .fuzz_loop(&mut stages, &mut executor, &mut state, &mut mgr)

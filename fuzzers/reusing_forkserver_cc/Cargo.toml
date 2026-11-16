@@ -30,7 +30,7 @@ libafl_targets = { path = "../../libafl_targets/", features = ["sancov_pcguard_h
 mimalloc = { version = "*", default-features = false }
 env_logger = "*"
 log = "*"
-reusing_core = { path = "../reusing_core/" }
+reusing_core = { path = "../reusing_core/", features = ["track_hit_feedbacks"] }
 
 [lib]
 name = "libforkserver_libafl_cc"

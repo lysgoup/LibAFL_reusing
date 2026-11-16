@@ -21,11 +21,13 @@
 pub mod dtaint;
 pub mod energy;
 pub mod meta;
+pub mod origin;
 pub mod pool;
 pub mod stage;
 
 pub use energy::ReusingEnergyStage;
 pub use meta::{FromSeed, ReusingCursors};
+pub use origin::{Origin, OriginFeedback, OriginMutator, StageLabel};
 pub use pool::ReusingPool;
 pub use stage::{Ablation, ReusingStage};
 

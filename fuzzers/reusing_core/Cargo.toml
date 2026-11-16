@@ -14,3 +14,8 @@ libafl = { path = "../../libafl/" }
 libafl_bolts = { path = "../../libafl_bolts/" }
 log = "0.4"
 serde = { version = "1.0", default-features = false, features = ["alloc", "derive"] }
+
+[features]
+# Forwarded to libafl: with it, every Feedback must report its last result,
+# and OriginFeedback does. A fuzzer that turns on libafl's turns on this.
+track_hit_feedbacks = ["libafl/track_hit_feedbacks"]

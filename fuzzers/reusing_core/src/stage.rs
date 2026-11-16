@@ -29,6 +29,7 @@ use libafl_bolts::rands::Rand;
 use crate::{
     dtaint::TaintMap,
     meta::ReusingCursors,
+    origin::{PendingOrigin, PendingWrite},
     pool::ReusingPool,
     MAX_EXEC, MIN_EXEC, TRIES_PER_RANGE_SET,
 };
@@ -175,7 +176,7 @@ where
             );
         }
 
-        let Some((map, mut cursors)) = self.taint_for_current(state)? else {
+        let Some((name, map, mut cursors)) = self.taint_for_current(state)? else {
             return Ok(());
         };
 
@@ -227,6 +228,7 @@ where
                     }
 
                     let Some(entry) = live.next_entry() else { break };
+                    let entry_idx = live.cursor - 1;
                     progressed = true;
 
                     // The ablations each redraw exactly one ingredient of
@@ -251,6 +253,28 @@ where
                             (live.ranges, &rand_segs)
                         }
                     };
+
+                    // What this try writes, for an Origin should it become a
+                    // corpus entry (see crate::origin); raw, it is cheap.
+                    state.add_metadata(PendingOrigin {
+                        stage: "reusing".into(),
+                        mutations: Vec::new(),
+                        reusing: Some(PendingWrite {
+                            seed: name.clone(),
+                            set_idx: live.set_idx,
+                            entry_idx,
+                            ranges: ranges.iter().map(|r| (r.start, r.end)).collect(),
+                            written: segs.to_vec(),
+                            original: ranges
+                                .iter()
+                                .map(|r| {
+                                    let b = original.bytes();
+                                    let e = (r.end as usize).min(b.len());
+                                    b[(r.start as usize).min(e)..e].to_vec()
+                                })
+                                .collect(),
+                        }),
+                    });
 
                     apply(scratch.bytes_mut(), ranges, segs);
                     fuzzer.evaluate_input(state, executor, manager, scratch.clone())?;
@@ -294,7 +318,7 @@ where
 }
 
 impl<E, EM, Z> ReusingStage<E, EM, Z> {
-    /// The current testcase's taint map and cursors, or `None` when there is
+    /// The current testcase's scan name (its `.dtaint`'s), taint map and cursors, or `None` when there is
     /// nothing for this stage to do.
     ///
     /// The map is parsed fresh every visit, as the C fuzzer does: a parsed map
@@ -302,7 +326,7 @@ impl<E, EM, Z> ReusingStage<E, EM, Z> {
     fn taint_for_current<S, I>(
         &mut self,
         state: &S,
-    ) -> Result<Option<(TaintMap, ReusingCursors)>, Error>
+    ) -> Result<Option<(String, TaintMap, ReusingCursors)>, Error>
     where
         S: HasCurrentTestcase<I> + HasMetadata,
         I: Input,
@@ -353,7 +377,7 @@ impl<E, EM, Z> ReusingStage<E, EM, Z> {
             map.n_all
         );
 
-        Ok(Some((map, cursors)))
+        Ok(Some((name, map, cursors)))
     }
 }
 
