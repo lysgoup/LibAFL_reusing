@@ -26,18 +26,12 @@ use libafl::{
     fuzzer::{Fuzzer, StdFuzzer},
     inputs::{BytesInput, HasTargetBytes, Input},
     monitors::{SimpleMonitor, OnDiskTOMLMonitor},
-    mutators::{
-        scheduled::havoc_mutations, token_mutations::I2SRandReplace, tokens_mutations,
-        StdMOptMutator, StdScheduledMutator, Tokens,
-    },
+    mutators::{scheduled::havoc_mutations, tokens_mutations, StdMOptMutator, Tokens},
     observers::{CanTrack, HitcountsMapObserver, TimeObserver},
     schedulers::{
         powersched::PowerSchedule, IndexesLenTimeMinimizerScheduler, StdWeightedScheduler,
     },
-    stages::{
-        calibrate::CalibrationStage, power::StdPowerMutationalStage, StdMutationalStage,
-        TracingStage,
-    },
+    stages::{calibrate::CalibrationStage, power::StdPowerMutationalStage},
     state::{HasCorpus, StdState},
     Error, HasMetadata,
 };
@@ -51,9 +45,7 @@ use libafl_bolts::{
 };
 #[cfg(any(target_os = "linux", target_vendor = "apple"))]
 use libafl_targets::autotokens;
-use libafl_targets::{
-    libfuzzer_initialize, libfuzzer_test_one_input, std_edges_map_observer, CmpLogObserver,
-};
+use libafl_targets::{libfuzzer_initialize, libfuzzer_test_one_input, std_edges_map_observer};
 #[cfg(unix)]
 use nix::unistd::dup;
 use reusing_core::{Ablation, FromSeed, ReusingEnergyStage, ReusingStage};
@@ -313,8 +305,6 @@ fn fuzz(
     // Create an observation channel to keep track of the execution time
     let time_observer = TimeObserver::new("time");
 
-    let cmplog_observer = CmpLogObserver::new("cmplog", true);
-
     let map_feedback = MaxMapFeedback::new(&edges_observer);
 
     let calibration = CalibrationStage::new(&map_feedback);
@@ -359,9 +349,6 @@ fn fuzz(
         println!("Warning: LLVMFuzzerInitialize failed with -1");
     }
 
-    // Setup a randomic Input2State stage
-    let i2s = StdMutationalStage::new(StdScheduledMutator::new(tuple_list!(I2SRandReplace::new())));
-
     // Setup a MOPT mutator
     let mutator = StdMOptMutator::new(
         &mut state,
@@ -389,8 +376,6 @@ fn fuzz(
         ExitKind::Ok
     };
 
-    let mut tracing_harness = harness;
-
     // Create the executor for an in-process function with one observer for edge coverage and one for the execution time
     let mut executor = InProcessExecutor::with_timeout(
         &mut harness,
@@ -400,19 +385,6 @@ fn fuzz(
         &mut mgr,
         timeout,
     )?;
-
-    // Setup a tracing stage in which we log comparisons
-    let tracing = TracingStage::new(
-        InProcessExecutor::with_timeout(
-            &mut tracing_harness,
-            tuple_list!(cmplog_observer),
-            &mut fuzzer,
-            &mut state,
-            &mut mgr,
-            timeout * 10,
-        )?,
-        // Give it more time!
-    );
 
     // Loud failure on a missing scan dir: an arm quietly running without its
     // pool is indistinguishable from the baseline afterwards.
@@ -436,7 +408,9 @@ fn fuzz(
     let power = ReusingEnergyStage::new(power).with_max_base(POWER_MAX_ITERATIONS);
 
     // The order of the stages matter!
-    let mut stages = tuple_list!(calibration, tracing, i2s, reusing, power);
+    // No cmplog: no tracing or i2s stage (and, in libafl_cc and Cargo.toml, no
+    // trace-cmp, CmpLogRtn or sancov_cmplog). Everything else is libafl_stats.
+    let mut stages = tuple_list!(calibration, reusing, power);
 
     // Read tokens
     if state.metadata_map().get::<Tokens>().is_none() {

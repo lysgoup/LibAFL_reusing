@@ -16,13 +16,14 @@ pub fn main() {
 
         dir.pop();
 
-        // Must be always present, even without --libafl
-        args.push("-fsanitize-coverage=trace-pc-guard,trace-cmp".into());
+        // Must be always present, even without --libafl. No trace-cmp: without
+        // cmplog nothing reads the comparison hooks it would insert.
+        args.push("-fsanitize-coverage=trace-pc-guard".into());
 
+        // No AutoTokens pass: no libafl_token section, so autotokens() in
+        // lib.rs finds none (its section symbols are weak) and returns no
+        // tokens. The -x dictionary and the token mutations stay.
         let mut cc = ClangWrapper::new();
-
-        #[cfg(any(target_os = "linux", target_vendor = "apple"))]
-        cc.add_pass(LLVMPasses::AutoTokens);
 
         if let Some(code) = cc
             .cpp(is_cpp)
@@ -33,7 +34,6 @@ pub fn main() {
             .parse_args(&args)
             .expect("Failed to parse the command line")
             .link_staticlib(&dir, "reusing_fuzzbench_in_process")
-            .add_pass(LLVMPasses::CmpLogRtn)
             .run()
             .expect("Failed to run the wrapped compiler")
         {
