@@ -48,7 +48,9 @@ use libafl_targets::autotokens;
 use libafl_targets::{libfuzzer_initialize, libfuzzer_test_one_input, std_edges_map_observer};
 #[cfg(unix)]
 use nix::unistd::dup;
-use reusing_core::{Ablation, FromSeed, ReusingEnergyStage, ReusingStage};
+use reusing_core::{
+    Ablation, FromSeed, OriginFeedback, ReusingEnergyStage, ReusingStage, StageLabel,
+};
 
 /// The power stage's ceiling on one draw, `HAVOC_MAX_MULT * 100` in
 /// `libafl::schedulers::testcase_score`, which keeps it private. The energy
@@ -310,12 +312,15 @@ fn fuzz(
     let calibration = CalibrationStage::new(&map_feedback);
 
     // Feedback to rate the interestingness of an input
-    // This one is composed by two Feedbacks in OR
+    // This one is composed by three Feedbacks in OR
     let mut feedback = feedback_or!(
         // New maximization map feedback linked to the edges observer and the feedback state
         map_feedback,
         // Time feedback, this one does not need a feedback state
-        TimeFeedback::new(&time_observer)
+        TimeFeedback::new(&time_observer),
+        // OriginFeedback never decides anything; it records where each new
+        // entry came from (reusing_core::origin) into the entry's .metadata.
+        OriginFeedback::new()
     );
 
     // A feedback to choose if an input is a solution or not
@@ -410,7 +415,14 @@ fn fuzz(
     // The order of the stages matter!
     // No cmplog: no tracing or i2s stage (and, in libafl_cc and Cargo.toml, no
     // trace-cmp, CmpLogRtn or sancov_cmplog). Everything else is libafl_stats.
-    let mut stages = tuple_list!(calibration, reusing, power);
+    // StageLabel names what each stage finds in its Origin. No OriginMutator
+    // on power: it assumes StdScheduledMutator's draws and would change MOpt's,
+    // so a havoc find's Origin has no mutation names.
+    let mut stages = tuple_list!(
+        calibration,
+        StageLabel::new("reusing", reusing),
+        StageLabel::new("havoc", power)
+    );
 
     // Read tokens
     if state.metadata_map().get::<Tokens>().is_none() {
