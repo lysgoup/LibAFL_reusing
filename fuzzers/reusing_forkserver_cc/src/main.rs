@@ -28,7 +28,7 @@ use libafl_bolts::{
 use libafl_targets::EDGES_MAP_SIZE_IN_USE;
 use nix::sys::signal::Signal;
 use reusing_core::{
-    Ablation, FromSeed, OriginFeedback, OriginMutator, ReusingEnergyStage, ReusingStage, StageLabel,
+    Ablation, FromSeed, OriginFeedback, ReusingEnergyStage, ReusingStage, StageLabel,
 };
 
 /// The commandline args this fuzzer accepts
@@ -243,12 +243,11 @@ pub fn main() {
     state.add_metadata(tokens);
 
     // Setup a mutational stage with a basic bytes mutator
-    // OriginMutator draws what StdScheduledMutator would and names the
-    // mutations it applied, for the Origin of whatever they find.
-    let mutator = OriginMutator::new(StdScheduledMutator::with_max_stack_pow(
-        havoc_mutations().merge(tokens_mutations()),
-        6,
-    ));
+    // No OriginMutator: it assumes StdScheduledMutator's draws, so the mutator
+    // stays free to change (MOpt, say); a havoc find's Origin has no mutation
+    // names, only its stage and parent.
+    let mutator =
+        StdScheduledMutator::with_max_stack_pow(havoc_mutations().merge(tokens_mutations()), 6);
 
     if let Some(reusing_dir) = opt.reusing_dir {
         // Everything in the corpus right now came in with the seeds: the
